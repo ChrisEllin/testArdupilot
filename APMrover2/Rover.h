@@ -50,7 +50,6 @@
 #include <AP_Stats/AP_Stats.h>                      // statistics library
 #include <AP_Terrain/AP_Terrain.h>
 #include <AP_Vehicle/AP_Vehicle.h>                  // needed for AHRS build
-#include <AP_VisualOdom/AP_VisualOdom.h>
 #include <AP_WheelEncoder/AP_WheelEncoder.h>
 #include <AP_WheelEncoder/AP_WheelRateControl.h>
 #include <APM_Control/AR_AttitudeControl.h>
@@ -126,10 +125,6 @@ public:
 
     Rover(void);
 
-    // HAL::Callbacks implementation.
-    void setup(void) override;
-    void loop(void) override;
-
 private:
 
     // must be the first AP_Param variable declared to ensure its
@@ -140,9 +135,6 @@ private:
     // all settable parameters
     Parameters g;
     ParametersG2 g2;
-
-    // main loop scheduler
-    AP_Scheduler scheduler;
 
     // mapping between input channels
     RCMapper rcmap;
@@ -160,15 +152,6 @@ private:
 
     // AP_RPM Module
     AP_RPM rpm_sensor;
-
-    // Inertial Navigation EKF
-#if AP_AHRS_NAVEKF_AVAILABLE
-    NavEKF2 EKF2{&ahrs, rangefinder};
-    NavEKF3 EKF3{&ahrs, rangefinder};
-    AP_AHRS_NavEKF ahrs{EKF2, EKF3};
-#else
-    AP_AHRS_DCM ahrs;
-#endif
 
     // Arming/Disarming management class
     AP_Arming_Rover arming;
@@ -203,9 +186,8 @@ private:
 #endif
 
     // Camera/Antenna mount tracking and stabilisation stuff
-#if MOUNT == ENABLED
-    // current_loc uses the baro/gps solution for altitude rather than gps only.
-    AP_Mount camera_mount{current_loc};
+#if HAL_MOUNT_ENABLED
+    AP_Mount camera_mount;
 #endif
 
     // true if initialisation has completed
@@ -245,14 +227,6 @@ private:
                            FUNCTOR_BIND_MEMBER(&Rover::handle_battery_failsafe, void, const char*, const int8_t),
                            _failsafe_priorities};
 
-    // true if the compass's initial location has been set
-    bool compass_init_location;
-
-    // IMU variables
-    // The main loop execution time.  Seconds
-    // This is the time between calls to the DCM algorithm and is the Integration time for the gyros.
-    float G_Dt;
-
     // flyforward timer
     uint32_t flyforward_start_ms;
 
@@ -263,9 +237,6 @@ private:
 
     // time that rudder/steering arming has been running
     uint32_t rudder_arm_timer;
-
-    // Store the time the last GPS message was received.
-    uint32_t last_gps_msg_ms{0};
 
     // latest wheel encoder values
     float wheel_encoder_last_distance_m[WHEELENCODER_MAX_INSTANCES];    // total distance recorded by wheel encoder (for reporting to GCS)
@@ -301,14 +272,17 @@ private:
 
 private:
 
-    // APMrover2.cpp
+    // Rover.cpp
+    bool set_target_location(const Location& target_loc) override;
+    bool set_target_velocity_NED(const Vector3f& vel_ned) override;
+    bool set_steering_and_throttle(float steering, float throttle) override;
+    bool get_control_output(AP_Vehicle::ControlOutput control_output, float &control_value) override;
     void stats_update();
     void ahrs_update();
     void gcs_failsafe_check(void);
     void update_logging1(void);
     void update_logging2(void);
     void one_second_loop(void);
-    void update_GPS(void);
     void update_current_mode(void);
     void update_mission(void);
 
@@ -341,7 +315,7 @@ private:
     void failsafe_ekf_off_event(void);
 
     // failsafe.cpp
-    void failsafe_trigger(uint8_t failsafe_type, bool on);
+    void failsafe_trigger(uint8_t failsafe_type, const char* type_str, bool on);
     void handle_battery_failsafe(const char* type_str, const int8_t action);
 #if ADVANCED_FAILSAFE == ENABLED
     void afs_fs_check(void);
@@ -372,10 +346,10 @@ private:
     Mode *mode_from_mode_num(enum Mode::Number num);
 
     // Parameters.cpp
-    void load_parameters(void);
+    void load_parameters(void) override;
 
     // radio.cpp
-    void set_control_channels(void);
+    void set_control_channels(void) override;
     void init_rc_in();
     void rudder_arm_disarm_check();
     void read_radio();
@@ -385,24 +359,27 @@ private:
     // sensors.cpp
     void update_compass(void);
     void compass_save(void);
-    void init_beacon();
-    void init_visual_odom();
     void update_wheel_encoder();
     void accel_cal_update(void);
     void read_rangefinders(void);
-    void init_proximity();
     void read_airspeed();
     void rpm_update(void);
 
     // Steering.cpp
     void set_servos(void);
 
+    // Rover.cpp
+    void get_scheduler_tasks(const AP_Scheduler::Task *&tasks,
+                             uint8_t &task_count,
+                             uint32_t &log_bit) override;
+
     // system.cpp
-    void init_ardupilot();
+    void init_ardupilot() override;
     void startup_ground(void);
     void update_ahrs_flyforward();
     bool set_mode(Mode &new_mode, ModeReason reason);
     bool set_mode(const uint8_t new_mode, ModeReason reason) override;
+    uint8_t get_mode() const override { return (uint8_t)control_mode->mode_number(); }
     bool mavlink_set_mode(uint8_t mode);
     void startup_INS_ground(void);
     void notify_mode(const Mode *new_mode);
@@ -441,7 +418,6 @@ private:
 
 
 public:
-    void mavlink_delay_cb();
     void failsafe_check();
     // Motor test
     void motor_test_output();

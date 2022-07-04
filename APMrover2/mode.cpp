@@ -105,6 +105,18 @@ void Mode::get_pilot_desired_steering_and_throttle(float &steering_out, float &t
     // do basic conversion
     get_pilot_input(steering_out, throttle_out);
 
+    // for skid steering vehicles, if pilot commands would lead to saturation
+    // we proportionally reduce steering and throttle
+    if (g2.motors.have_skid_steering()) {
+        const float steer_normalised = constrain_float(steering_out / 4500.0f, -1.0f, 1.0f);
+        const float throttle_normalised = constrain_float(throttle_out / 100.0f, -1.0f, 1.0f);
+        const float saturation_value = fabsf(steer_normalised) + fabsf(throttle_normalised);
+        if (saturation_value > 1.0f) {
+            steering_out /= saturation_value;
+            throttle_out /= saturation_value;
+        }
+    }
+
     // check for special case of input and output throttle being in opposite directions
     float throttle_out_limited = g2.motors.get_slew_limited_throttle(throttle_out, rover.G_Dt);
     if ((is_negative(throttle_out) != is_negative(throttle_out_limited)) &&
@@ -209,17 +221,6 @@ bool Mode::set_desired_location(const struct Location& destination, float next_l
     return true;
 }
 
-// set desired heading and speed
-void Mode::set_desired_heading_and_speed(float yaw_angle_cd, float target_speed)
-{
-    // handle initialisation
-    _reached_destination = false;
-
-    // record targets
-    _desired_yaw_cd = yaw_angle_cd;
-    _desired_speed = target_speed;
-}
-
 // get default speed for this mode (held in WP_SPEED or RTL_SPEED)
 float Mode::get_speed_default(bool rtl) const
 {
@@ -228,22 +229,6 @@ float Mode::get_speed_default(bool rtl) const
     }
 
     return g2.wp_nav.get_default_speed();
-}
-
-// restore desired speed to default from parameter values (WP_SPEED)
-void Mode::set_desired_speed_to_default(bool rtl)
-{
-    _desired_speed = get_speed_default(rtl);
-}
-
-// set desired speed in m/s
-bool Mode::set_desired_speed(float speed)
-{
-    if (!is_negative(speed)) {
-        _desired_speed = speed;
-        return true;
-    }
-    return false;
 }
 
 // execute the mission in reverse (i.e. backing up)
@@ -269,6 +254,12 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
     // apply object avoidance to desired speed using half vehicle's maximum deceleration
     if (avoidance_enabled) {
         g2.avoid.adjust_speed(0.0f, 0.5f * attitude_control.get_decel_max(), ahrs.yaw, target_speed, rover.G_Dt);
+        if (g2.sailboat.tack_enabled() && g2.avoid.limits_active()) {
+            // we are a sailboat trying to avoid fence, try a tack
+            if (rover.control_mode != &rover.mode_acro) {
+                rover.control_mode->handle_tack_request();
+            }
+        }
     }
 
     // call throttle controller and convert output to -100 to +100 range
@@ -277,8 +268,10 @@ void Mode::calc_throttle(float target_speed, bool avoidance_enabled)
     if (rover.g2.sailboat.sail_enabled()) {
         // sailboats use special throttle and mainsail controller
         float mainsail_out = 0.0f;
-        rover.g2.sailboat.get_throttle_and_mainsail_out(target_speed, throttle_out, mainsail_out);
+        float wingsail_out = 0.0f;
+        rover.g2.sailboat.get_throttle_and_mainsail_out(target_speed, throttle_out, mainsail_out, wingsail_out);
         rover.g2.motors.set_mainsail(mainsail_out);
+        rover.g2.motors.set_wingsail(wingsail_out);
     } else {
         // call speed or stop controller
         if (is_zero(target_speed) && !rover.is_balancebot()) {
@@ -313,8 +306,9 @@ bool Mode::stop_vehicle()
         throttle_out = 100.0f * attitude_control.get_throttle_out_stop(g2.motors.limit.throttle_lower, g2.motors.limit.throttle_upper, g.speed_cruise, g.throttle_cruise * 0.01f, rover.G_Dt, stopped);
     }
 
-    // relax mainsail if present
+    // relax sails if present
     g2.motors.set_mainsail(100.0f);
+    g2.motors.set_wingsail(0.0f);
 
     // send to motor
     g2.motors.set_throttle(throttle_out);
@@ -497,7 +491,7 @@ Mode *Rover::mode_from_mode_num(const enum Mode::Number num)
         ret = &mode_smartrtl;
         break;
     case Mode::Number::GUIDED:
-       ret = &mode_guided;
+        ret = &mode_guided;
         break;
     case Mode::Number::INITIALISING:
         ret = &mode_initializing;

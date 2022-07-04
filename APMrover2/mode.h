@@ -72,6 +72,9 @@ public:
     // returns true if vehicle can be armed or disarmed from the transmitter in this mode
     virtual bool allows_arming_from_transmitter() { return !is_autopilot_mode(); }
 
+    // returns false if vehicle cannot be armed in this mode
+    virtual bool allows_arming() const { return true; }
+
     bool allows_stick_mixing() const { return is_autopilot_mode(); }
 
     //
@@ -115,19 +118,12 @@ public:
     // true if vehicle has reached desired location. defaults to true because this is normally used by missions and we do not want the mission to become stuck
     virtual bool reached_destination() const { return true; }
 
-    // set desired heading and speed - supported in Auto and Guided modes
-    virtual void set_desired_heading_and_speed(float yaw_angle_cd, float target_speed);
-
     // get default speed for this mode (held in CRUISE_SPEED, WP_SPEED or RTL_SPEED)
     // rtl argument should be true if called from RTL or SmartRTL modes (handled here to avoid duplication)
     float get_speed_default(bool rtl = false) const;
 
     // set desired speed in m/s
-    bool set_desired_speed(float speed);
-
-    // restore desired speed to default from parameter values (CRUISE_SPEED or WP_SPEED)
-    // rtl argument should be true if called from RTL or SmartRTL modes (handled here to avoid duplication)
-    void set_desired_speed_to_default(bool rtl = false);
+    virtual bool set_desired_speed(float speed) { return false; }
 
     // execute the mission in reverse (i.e. backing up)
     void set_reversed(bool value);
@@ -207,7 +203,6 @@ protected:
     float _distance_to_destination; // distance from vehicle to final destination in meters
     bool _reached_destination;  // true once the vehicle has reached the destination
     float _desired_yaw_cd;      // desired yaw in centi-degrees.  used in Auto, Guided and Loiter
-    float _desired_speed;       // desired speed in m/s
 };
 
 
@@ -258,9 +253,8 @@ public:
     bool set_desired_location(const struct Location& destination, float next_leg_bearing_cd = AR_WPNAV_HEADING_UNKNOWN) override WARN_IF_UNUSED;
     bool reached_destination() const override;
 
-    // heading and speed control
-    void set_desired_heading_and_speed(float yaw_angle_cd, float target_speed) override;
-    bool reached_heading();
+    // set desired speed in m/s
+    bool set_desired_speed(float speed) override;
 
     // start RTL (within auto)
     void start_RTL();
@@ -325,7 +319,10 @@ private:
     };
 
     bool auto_triggered;        // true when auto has been triggered to start
-    bool _reached_heading;      // true when vehicle has reached desired heading in TurnToHeading sub mode
+
+    // HeadingAndSpeed sub mode variables
+    float _desired_speed;   // desired speed in HeadingAndSpeed submode
+    bool _reached_heading;  // true when vehicle has reached desired heading in TurnToHeading sub mode
 
     // Loiter control
     uint16_t loiter_duration;       // How long we should loiter at the nav_waypoint (time in seconds)
@@ -376,16 +373,22 @@ public:
     // return true if vehicle has reached destination
     bool reached_destination() const override;
 
+    // set desired speed in m/s
+    bool set_desired_speed(float speed) override;
+
     // get or set desired location
     bool get_desired_location(Location& destination) const override WARN_IF_UNUSED;
     bool set_desired_location(const struct Location& destination, float next_leg_bearing_cd = AR_WPNAV_HEADING_UNKNOWN) override WARN_IF_UNUSED;
 
     // set desired heading and speed
-    void set_desired_heading_and_speed(float yaw_angle_cd, float target_speed) override;
+    void set_desired_heading_and_speed(float yaw_angle_cd, float target_speed);
 
     // set desired heading-delta, turn-rate and speed
     void set_desired_heading_delta_and_speed(float yaw_delta_cd, float target_speed);
     void set_desired_turn_rate_and_speed(float turn_rate_cds, float target_speed);
+
+    // set steering and throttle (-1 to +1).  Only called from scripts
+    void set_steering_and_throttle(float steering, float throttle);
 
     // vehicle start loiter
     bool start_loiter();
@@ -402,7 +405,8 @@ protected:
         Guided_WP,
         Guided_HeadingAndSpeed,
         Guided_TurnRateAndSpeed,
-        Guided_Loiter
+        Guided_Loiter,
+        Guided_SteeringAndThrottle
     };
 
     bool _enter() override;
@@ -414,6 +418,13 @@ protected:
     uint32_t _des_att_time_ms;  // system time last call to set_desired_attitude was made (used for timeout)
     float _desired_yaw_rate_cds;// target turn rate centi-degrees per second
     bool sent_notification;     // used to send one time notification to ground station
+    float _desired_speed;       // desired speed used only in HeadingAndSpeed submode
+
+    // direct steering and throttle control
+    bool _have_strthr;          // true if we have a valid direct steering and throttle inputs
+    uint32_t _strthr_time_ms;   // system time last call to set_steering_and_throttle was made (used for timeout)
+    float _strthr_steering;     // direct steering input in the range -1 to +1
+    float _strthr_throttle;     // direct throttle input in the range -1 to +1
 
     // limits
     struct {
@@ -472,6 +483,7 @@ protected:
     bool _enter() override;
 
     Location _destination;      // target location to hold position around
+    float _desired_speed;       // desired speed (ramped down from initial speed to zero)
 };
 
 class ModeManual : public Mode
@@ -511,12 +523,18 @@ public:
     // attributes of the mode
     bool is_autopilot_mode() const override { return true; }
 
+    // do not allow arming from this mode
+    bool allows_arming() const override { return false; }
+
     // return desired location
     bool get_desired_location(Location& destination) const override WARN_IF_UNUSED;
 
     // return distance (in meters) to destination
     float get_distance_to_destination() const override { return _distance_to_destination; }
     bool reached_destination() const override;
+
+    // set desired speed in m/s
+    bool set_desired_speed(float speed) override;
 
 protected:
 
@@ -540,12 +558,18 @@ public:
     // attributes of the mode
     bool is_autopilot_mode() const override { return true; }
 
+    // do not allow arming from this mode
+    bool allows_arming() const override { return false; }
+
     // return desired location
     bool get_desired_location(Location& destination) const override WARN_IF_UNUSED;
 
     // return distance (in meters) to destination
     float get_distance_to_destination() const override { return _distance_to_destination; }
     bool reached_destination() const override { return smart_rtl_state == SmartRTL_StopAtHome; }
+
+    // set desired speed in m/s
+    bool set_desired_speed(float speed) override;
 
     // save current position for use by the smart_rtl flight mode
     void save_position();
@@ -631,10 +655,15 @@ public:
     // return distance (in meters) to destination
     float get_distance_to_destination() const override;
 
+    // set desired speed in m/s
+    bool set_desired_speed(float speed) override;
+
 protected:
 
     bool _enter() override;
     void _exit() override;
+
+    float _desired_speed;       // desired speed in m/s
 };
 
 class ModeSimple : public Mode

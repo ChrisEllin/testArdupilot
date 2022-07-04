@@ -14,7 +14,7 @@
 */
 
 /*
-   This is the APMrover2 firmware. It was originally derived from
+   This is the ArduRover firmware. It was originally derived from
    ArduPlane by Jean-Louis Naudin (JLN), and then rewritten after the
    AP_HAL merge by Andrew Tridgell
 
@@ -26,7 +26,7 @@
 
    APMrover alpha version tester: Franco Borasio, Daniel Chapelat...
 
-   Please contribute your ideas! See http://dev.ardupilot.org for details
+   Please contribute your ideas! See https://dev.ardupilot.org for details
 */
 
 #include "Rover.h"
@@ -53,14 +53,11 @@ const AP_Scheduler::Task Rover::scheduler_tasks[] = {
     SCHED_TASK(read_rangefinders,      50,    200),
     SCHED_TASK(update_current_mode,   400,    200),
     SCHED_TASK(set_servos,            400,    200),
-    SCHED_TASK(update_GPS,             50,    300),
+    SCHED_TASK_CLASS(AP_GPS,              &rover.gps,              update,         50,  300),
     SCHED_TASK_CLASS(AP_Baro,             &rover.barometer,        update,         10,  200),
     SCHED_TASK_CLASS(AP_Beacon,           &rover.g2.beacon,        update,         50,  200),
     SCHED_TASK_CLASS(AP_Proximity,        &rover.g2.proximity,     update,         50,  200),
     SCHED_TASK_CLASS(AP_WindVane,         &rover.g2.windvane,      update,         20,  100),
-#if VISUAL_ODOMETRY_ENABLED == ENABLED
-    SCHED_TASK_CLASS(AP_VisualOdom,       &rover.g2.visual_odom,   update,         50,  200),
-#endif
     SCHED_TASK_CLASS(AC_Fence,            &rover.g2.fence,         update,         10,  100),
     SCHED_TASK(update_wheel_encoder,   50,    200),
     SCHED_TASK(update_compass,         10,    200),
@@ -77,11 +74,11 @@ const AP_Scheduler::Task Rover::scheduler_tasks[] = {
     SCHED_TASK_CLASS(AP_Gripper,          &rover.g2.gripper,      update,         10,   75),
 #endif
     SCHED_TASK(rpm_update,             10,    100),
-#if MOUNT == ENABLED
+#if HAL_MOUNT_ENABLED
     SCHED_TASK_CLASS(AP_Mount,            &rover.camera_mount,     update,         50,  200),
 #endif
 #if CAMERA == ENABLED
-    SCHED_TASK_CLASS(AP_Camera,           &rover.camera,           update_trigger, 50,  200),
+    SCHED_TASK_CLASS(AP_Camera,           &rover.camera,           update,         50,  200),
 #endif
     SCHED_TASK(gcs_failsafe_check,     10,    200),
     SCHED_TASK(fence_check,            10,    200),
@@ -89,7 +86,9 @@ const AP_Scheduler::Task Rover::scheduler_tasks[] = {
     SCHED_TASK_CLASS(ModeSmartRTL,        &rover.mode_smartrtl,    save_position,   3,  200),
     SCHED_TASK_CLASS(AP_Notify,           &rover.notify,           update,         50,  300),
     SCHED_TASK(one_second_loop,         1,   1500),
+#if HAL_SPRAYER_ENABLED
     SCHED_TASK_CLASS(AC_Sprayer,          &rover.g2.sprayer,           update,      3,  90),
+#endif
     SCHED_TASK_CLASS(Compass,          &rover.compass,              cal_update, 50, 200),
     SCHED_TASK(compass_save,           0.1,   200),
     SCHED_TASK(accel_cal_update,       10,    200),
@@ -113,6 +112,16 @@ const AP_Scheduler::Task Rover::scheduler_tasks[] = {
 #endif
 };
 
+
+void Rover::get_scheduler_tasks(const AP_Scheduler::Task *&tasks,
+                                uint8_t &task_count,
+                                uint32_t &log_bit)
+{
+    tasks = &scheduler_tasks[0];
+    task_count = ARRAY_SIZE(scheduler_tasks);
+    log_bit = MASK_LOG_PM;
+}
+
 constexpr int8_t Rover::_failsafe_priorities[7];
 
 Rover::Rover(void) :
@@ -123,9 +132,78 @@ Rover::Rover(void) :
     channel_lateral(nullptr),
     logger{g.log_bitmask},
     modes(&g.mode1),
-    control_mode(&mode_initializing),
-    G_Dt(0.02f)
+    control_mode(&mode_initializing)
 {
+}
+
+// set target location (for use by scripting)
+bool Rover::set_target_location(const Location& target_loc)
+{
+    // exit if vehicle is not in Guided mode or Auto-Guided mode
+    if (!control_mode->in_guided_mode()) {
+        return false;
+    }
+
+    return control_mode->set_desired_location(target_loc);
+}
+
+// set target velocity (for use by scripting)
+bool Rover::set_target_velocity_NED(const Vector3f& vel_ned)
+{
+    // exit if vehicle is not in Guided mode or Auto-Guided mode
+    if (!control_mode->in_guided_mode()) {
+        return false;
+    }
+
+    // convert vector length into speed
+    const float target_speed_m = safe_sqrt(sq(vel_ned.x) + sq(vel_ned.y));
+
+    // convert vector direction to target yaw
+    const float target_yaw_cd = degrees(atan2f(vel_ned.y, vel_ned.x)) * 100.0f;
+
+    // send target heading and speed
+    mode_guided.set_desired_heading_and_speed(target_yaw_cd, target_speed_m);
+
+    return true;
+}
+
+// set steering and throttle (-1 to +1) (for use by scripting)
+bool Rover::set_steering_and_throttle(float steering, float throttle)
+{
+    // exit if vehicle is not in Guided mode or Auto-Guided mode
+    if (!control_mode->in_guided_mode()) {
+        return false;
+    }
+
+    // set steering and throttle
+    mode_guided.set_steering_and_throttle(steering, throttle);
+    return true;
+}
+
+// get control output (for use in scripting)
+// returns true on success and control_value is set to a value in the range -1 to +1
+bool Rover::get_control_output(AP_Vehicle::ControlOutput control_output, float &control_value)
+{
+    switch (control_output) {
+    case AP_Vehicle::ControlOutput::Throttle:
+        control_value = constrain_float(g2.motors.get_throttle() / 100.0f, -1.0f, 1.0f);
+        return true;
+    case AP_Vehicle::ControlOutput::Yaw:
+        control_value = constrain_float(g2.motors.get_steering() / 4500.0f, -1.0f, 1.0f);
+        return true;
+    case AP_Vehicle::ControlOutput::Lateral:
+        control_value = constrain_float(g2.motors.get_lateral() / 100.0f, -1.0f, 1.0f);
+        return true;
+    case AP_Vehicle::ControlOutput::MainSail:
+        control_value = constrain_float(g2.motors.get_mainsail() / 100.0f, -1.0f, 1.0f);
+        return true;
+    case AP_Vehicle::ControlOutput::WingSail:
+        control_value = constrain_float(g2.motors.get_wingsail() / 100.0f, -1.0f, 1.0f);
+        return true;
+    default:
+        return false;
+    }
+    return false;
 }
 
 #if STATS_ENABLED == ENABLED
@@ -139,28 +217,6 @@ void Rover::stats_update(void)
 }
 #endif
 
-/*
-  setup is called when the sketch starts
- */
-void Rover::setup()
-{
-    // load the default values of variables listed in var_info[]
-    AP_Param::setup_sketch_defaults();
-
-    init_ardupilot();
-
-    // initialise the main loop scheduler
-    scheduler.init(&scheduler_tasks[0], ARRAY_SIZE(scheduler_tasks), MASK_LOG_PM);
-}
-
-/*
-  loop() is called rapidly while the sketch is running
- */
-void Rover::loop()
-{
-    scheduler.loop();
-    G_Dt = scheduler.get_last_loop_time_s();
-}
 
 // update AHRS system
 void Rover::ahrs_update()
@@ -216,7 +272,7 @@ void Rover::gcs_failsafe_check(void)
     }
 
     // check for updates from GCS within 2 seconds
-    failsafe_trigger(FAILSAFE_EVENT_GCS, failsafe.last_heartbeat_ms != 0 && (millis() - failsafe.last_heartbeat_ms) > 2000);
+    failsafe_trigger(FAILSAFE_EVENT_GCS, "GCS", failsafe.last_heartbeat_ms != 0 && (millis() - failsafe.last_heartbeat_ms) > 2000);
 }
 
 /*
@@ -279,7 +335,7 @@ void Rover::one_second_loop(void)
     // update notify flags
     AP_Notify::flags.pre_arm_check = arming.pre_arm_checks(false);
     AP_Notify::flags.pre_arm_gps_check = true;
-    AP_Notify::flags.armed = arming.is_armed() || arming.arming_required() == AP_Arming::Required::NO;
+    AP_Notify::flags.armed = arming.is_armed();
     AP_Notify::flags.flying = hal.util->get_soft_armed();
 
     // cope with changes to mavlink system ID
@@ -292,22 +348,10 @@ void Rover::one_second_loop(void)
 
     // need to set "likely flying" when armed to allow for compass
     // learning to run
-    ahrs.set_likely_flying(hal.util->get_soft_armed());
+    set_likely_flying(hal.util->get_soft_armed());
 
     // send latest param values to wp_nav
     g2.wp_nav.set_turn_params(g.turn_max_g, g2.turn_radius, g2.motors.have_skid_steering());
-}
-
-void Rover::update_GPS(void)
-{
-    gps.update();
-    if (gps.last_message_time_ms() != last_gps_msg_ms) {
-        last_gps_msg_ms = gps.last_message_time_ms();
-
-#if CAMERA == ENABLED
-        camera.update();
-#endif
-    }
 }
 
 void Rover::update_current_mode(void)
@@ -350,5 +394,6 @@ void Rover::publish_osd_info()
 #endif
 
 Rover rover;
+AP_Vehicle& vehicle = rover;
 
 AP_HAL_MAIN_CALLBACKS(&rover);

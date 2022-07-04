@@ -26,7 +26,7 @@ public:
         //
         k_param_format_version = 0,
         k_param_software_type, // unused
-        k_param_BoardConfig_CAN,
+        k_param_can_mgr,
 
         // Misc
         //
@@ -212,6 +212,8 @@ public:
         k_param_logger = 253,  // Logging Group
 
         // 254,255: reserved
+
+        k_param_vehicle = 257, // vehicle common block of parameters
         };
 
     AP_Int16    format_version;
@@ -296,9 +298,6 @@ public:
 
     AP_Beacon beacon;
 
-    // Visual Odometry camera
-    AP_VisualOdom visual_odom;
-
     // Motor library
     AP_MotorsUGV motors;
 
@@ -349,8 +348,10 @@ public:
     AP_Int8 loit_type;
     AP_Float loit_radius;
 
+#if HAL_SPRAYER_ENABLED
     // Sprayer
     AC_Sprayer sprayer;
+#endif
 
 #if GRIPPER_ENABLED
     AP_Gripper gripper;

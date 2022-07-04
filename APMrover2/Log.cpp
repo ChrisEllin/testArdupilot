@@ -1,6 +1,6 @@
 #include "Rover.h"
 
-#include <AP_RangeFinder/RangeFinder_Backend.h>
+#include <AP_RangeFinder/AP_RangeFinder_Backend.h>
 
 #if LOGGING_ENABLED == ENABLED
 
@@ -57,6 +57,13 @@ void Rover::Log_Write_Depth()
     }
     rangefinder_last_reading_ms = reading_ms;
 
+// @LoggerMessage: DPTH
+// @Description: Depth messages on boats with downwards facing range finder
+// @Field: TimeUS: Time since system startup
+// @Field: Lat: Latitude 
+// @Field: Lng: Longitude   
+// @Field: Depth: Depth as detected by the sensor
+
     logger.Write("DPTH", "TimeUS,Lat,Lng,Depth",
                         "sDUm", "FGG0", "QLLf",
                         AP_HAL::micros64(),
@@ -99,8 +106,8 @@ struct PACKED log_Nav_Tuning {
     LOG_PACKET_HEADER;
     uint64_t time_us;
     float wp_distance;
-    uint16_t wp_bearing_cd;
-    uint16_t nav_bearing_cd;
+    float wp_bearing;
+    float nav_bearing;
     uint16_t yaw;
     float xtrack_error;
 };
@@ -112,8 +119,8 @@ void Rover::Log_Write_Nav_Tuning()
         LOG_PACKET_HEADER_INIT(LOG_NTUN_MSG),
         time_us             : AP_HAL::micros64(),
         wp_distance         : control_mode->get_distance_to_destination(),
-        wp_bearing_cd       : (uint16_t)wrap_360_cd(control_mode->wp_bearing() * 100),
-        nav_bearing_cd      : (uint16_t)wrap_360_cd(control_mode->nav_bearing() * 100),
+        wp_bearing          : control_mode->wp_bearing(),
+        nav_bearing         : control_mode->nav_bearing(),
         yaw                 : (uint16_t)ahrs.yaw_sensor,
         xtrack_error        : control_mode->crosstrack_error()
     };
@@ -138,14 +145,27 @@ void Rover::Log_Write_Sail()
         wind_speed_true = g2.windvane.get_true_wind_speed();
         wind_speed_apparent = g2.windvane.get_apparent_wind_speed();
     }
-    logger.Write("SAIL", "TimeUS,WindDirTrue,WindDirApp,WindSpdTrue,WindSpdApp,SailOut,VMG",
-                        "shhnn%n", "F000000", "Qffffff",
+
+// @LoggerMessage: SAIL
+// @Description: Sailboat information
+// @Field: TimeUS: Time since system startup
+// @Field: WndDrTru: True wind direction
+// @Field: WndDrApp: Apparent wind direction, in body-frame
+// @Field: WndSpdTru: True wind speed
+// @Field: WndSpdApp: Apparent wind Speed
+// @Field: MainOut: Normalized mainsail output 
+// @Field: WingOut: Normalized wingsail output
+// @Field: VMG: Velocity made good (speed at which vehicle is making progress directly towards destination)
+
+    logger.Write("SAIL", "TimeUS,WndDrTru,WndDrApp,WndSpdTru,WndSpdApp,MainOut,WingOut,VMG",
+                        "shhnn%%n", "F0000000", "Qfffffff",
                         AP_HAL::micros64(),
                         (double)wind_dir_abs,
                         (double)wind_dir_rel,
                         (double)wind_speed_true,
                         (double)wind_speed_apparent,
                         (double)g2.motors.get_mainsail(),
+                        (double)g2.motors.get_wingsail(),
                         (double)g2.sailboat.get_VMG());
 }
 
@@ -245,16 +265,68 @@ void Rover::Log_Write_Vehicle_Startup_Messages()
 // type and unit information can be found in
 // libraries/AP_Logger/Logstructure.h; search for "log_Units" for
 // units and "Format characters" for field type information
+
 const LogStructure Rover::log_structure[] = {
     LOG_COMMON_STRUCTURES,
+
+// @LoggerMessage: STRT
+// @Description: Startup messages
+// @Field: TimeUS: Time since system startup
+// @Field: SType: Type of startup
+// @Field: CTot: Total number of commands in the mission
+
     { LOG_STARTUP_MSG, sizeof(log_Startup),
       "STRT", "QBH",        "TimeUS,SType,CTot", "s--", "F--" },
+
+// @LoggerMessage: THR
+// @Description: Throttle related messages
+// @Field: TimeUS: Time since system startup
+// @Field: ThrIn: Throttle Input
+// @Field: ThrOut: Throttle Output 
+// @Field: DesSpeed: Desired speed 
+// @Field: Speed: Actual speed
+// @Field: AccY: Vehicle's acceleration in Y-Axis
+
     { LOG_THR_MSG, sizeof(log_Throttle),
       "THR", "Qhffff", "TimeUS,ThrIn,ThrOut,DesSpeed,Speed,AccY", "s--nno", "F--000" },
+
+// @LoggerMessage: NTUN
+// @Description: Navigation Tuning information - e.g. vehicle destination
+// @URL: http://ardupilot.org/rover/docs/navigation.html
+// @Field: TimeUS: Time since system startup
+// @Field: WpDist: distance to the current navigation waypoint
+// @Field: WpBrg: bearing to the current navigation waypoint
+// @Field: DesYaw: the vehicle's desired heading
+// @Field: Yaw: the vehicle's current heading
+// @Field: XTrack: the vehicle's current distance from the current travel segment
+
     { LOG_NTUN_MSG, sizeof(log_Nav_Tuning),
-      "NTUN", "QfHHHf", "TimeUS,WpDist,WpBrg,DesYaw,Yaw,XTrack", "smdddm", "F0BBB0" },
+      "NTUN", "QfffHf", "TimeUS,WpDist,WpBrg,DesYaw,Yaw,XTrack", "smhhdm", "F000B0" },
+    
+// @LoggerMessage: STER
+// @Description: Steering related messages
+// @Field: TimeUS: Time since system startup
+// @Field: SteerIn: Steering input
+// @Field: SteerOut: Normalized steering output 
+// @Field: DesLatAcc: Desired lateral acceleration
+// @Field: LatAcc: Actual lateral acceleration
+// @Field: DesTurnRate: Desired turn rate
+// @Field: TurnRate: Actual turn rate
+    
     { LOG_STEERING_MSG, sizeof(log_Steering),
       "STER", "Qhfffff",   "TimeUS,SteerIn,SteerOut,DesLatAcc,LatAcc,DesTurnRate,TurnRate", "s--ookk", "F--0000" },
+
+// @LoggerMessage: GUID
+// @Description: Guided mode target information
+// @Field: TimeUS: Time since system startup
+// @Field: Type: Type of guided mode
+// @Field: pX: Target position, X-Axis
+// @Field: pY: Target position, Y-Axis
+// @Field: pZ: Target position, Z-Axis
+// @Field: vX: Target velocity, X-Axis
+// @Field: vY: Target velocity, Y-Axis
+// @Field: vZ: Target velocity, Z-Axis
+    
     { LOG_GUIDEDTARGET_MSG, sizeof(log_GuidedTarget),
       "GUID",  "QBffffff",    "TimeUS,Type,pX,pY,pZ,vX,vY,vZ", "s-mmmnnn", "F-000000" },
 };

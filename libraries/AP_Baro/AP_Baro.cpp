@@ -27,12 +27,13 @@
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Math/AP_Math.h>
 #include <AP_BoardConfig/AP_BoardConfig.h>
-#include <AP_BoardConfig/AP_BoardConfig_CAN.h>
+#include <AP_CANManager/AP_CANManager.h>
 #include <AP_Vehicle/AP_Vehicle_Type.h>
 
 #include "AP_Baro_SITL.h"
 #include "AP_Baro_BMP085.h"
 #include "AP_Baro_BMP280.h"
+#include "AP_Baro_SPL06.h"
 #include "AP_Baro_HIL.h"
 #include "AP_Baro_KellerLD.h"
 #include "AP_Baro_MS5611.h"
@@ -41,7 +42,8 @@
 #include "AP_Baro_FBM320.h"
 #include "AP_Baro_DPS280.h"
 #include "AP_Baro_BMP388.h"
-#if HAL_WITH_UAVCAN
+#include "AP_Baro_Dummy.h"
+#if HAL_ENABLE_LIBUAVCAN_DRIVERS
 #include "AP_Baro_UAVCAN.h"
 #endif
 
@@ -61,6 +63,10 @@
 
 #ifndef HAL_BARO_PROBE_EXT_DEFAULT
  #define HAL_BARO_PROBE_EXT_DEFAULT 0
+#endif
+
+#ifdef HAL_BUILD_AP_PERIPH
+#define HAL_BARO_ALLOW_INIT_NO_BARO
 #endif
 
 extern const AP_HAL::HAL& hal;
@@ -160,12 +166,37 @@ const AP_Param::GroupInfo AP_Baro::var_info[] = {
     // @Param: PROBE_EXT
     // @DisplayName: External barometers to probe
     // @Description: This sets which types of external i2c barometer to look for. It is a bitmask of barometer types. The I2C buses to probe is based on GND_EXT_BUS. If GND_EXT_BUS is -1 then it will probe all external buses, otherwise it will probe just the bus number given in GND_EXT_BUS.
-    // @Bitmask: 0:BMP085,1:BMP280,2:MS5611,3:MS5607,4:MS5637,5:FBM320,6:DPS280,7:LPS25H,8:Keller,9:MS5837,10:BMP388
-    // @Values: 1:BMP085,2:BMP280,4:MS5611,8:MS5607,16:MS5637,32:FBM320,64:DPS280,128:LPS25H,256:Keller,512:MS5837,1024:BMP388
+    // @Bitmask: 0:BMP085,1:BMP280,2:MS5611,3:MS5607,4:MS5637,5:FBM320,6:DPS280,7:LPS25H,8:Keller,9:MS5837,10:BMP388,11:SPL06
+    // @Values: 1:BMP085,2:BMP280,4:MS5611,8:MS5607,16:MS5637,32:FBM320,64:DPS280,128:LPS25H,256:Keller,512:MS5837,1024:BMP388,2048:SPL06
     // @User: Advanced
     AP_GROUPINFO("PROBE_EXT", 14, AP_Baro, _baro_probe_ext, HAL_BARO_PROBE_EXT_DEFAULT),
 #endif
 
+    // @Param: BARO_ID
+    // @DisplayName: Baro ID
+    // @Description: Barometer sensor ID, taking into account its type, bus and instance
+    // @ReadOnly: True
+    // @User: Advanced
+    AP_GROUPINFO("BARO_ID", 15, AP_Baro, sensors[0].bus_id, 0),
+
+#if BARO_MAX_INSTANCES > 1
+    // @Param: BARO2_ID
+    // @DisplayName: Baro ID2
+    // @Description: Barometer2 sensor ID, taking into account its type, bus and instance
+    // @ReadOnly: True
+    // @User: Advanced
+    AP_GROUPINFO("BARO2_ID", 16, AP_Baro, sensors[1].bus_id, 0),
+#endif
+
+#if BARO_MAX_INSTANCES > 2
+    // @Param: BARO3_ID
+    // @DisplayName: Baro ID3
+    // @Description: Barometer3 sensor ID, taking into account its type, bus and instance
+    // @ReadOnly: True
+    // @User: Advanced
+    AP_GROUPINFO("BARO3_ID", 17, AP_Baro, sensors[2].bus_id, 0),
+#endif
+    
     AP_GROUPEND
 };
 
@@ -199,9 +230,17 @@ void AP_Baro::calibrate(bool save)
     }
 
     if (hal.util->was_watchdog_reset()) {
-        BARO_SEND_TEXT(MAV_SEVERITY_INFO, "Baro: skipping calibration");
+        BARO_SEND_TEXT(MAV_SEVERITY_INFO, "Baro: skipping calibration after WDG reset");
         return;
     }
+    
+    #ifdef HAL_BARO_ALLOW_INIT_NO_BARO
+    if (_num_drivers == 0 || _num_sensors == 0 || drivers[0] == nullptr) {
+            BARO_SEND_TEXT(MAV_SEVERITY_INFO, "Baro: no sensors found, skipping calibration");
+            return;
+    }
+    #endif
+    
     BARO_SEND_TEXT(MAV_SEVERITY_INFO, "Calibrating barometer");
 
     // reset the altitude offset when we calibrate. The altitude
@@ -214,9 +253,11 @@ void AP_Baro::calibrate(bool save)
     for (uint8_t i = 0; i < 10; i++) {
         uint32_t tstart = AP_HAL::millis();
         do {
+			//hal.console->printf("tstart is:%d\n",(int)tstart);
             update();
+			//hal.console->printf("AP_HAL is:%d\n",(int)AP_HAL::millis());
             if (AP_HAL::millis() - tstart > 500) {
-                AP_BoardConfig::sensor_config_error("Baro: unable to calibrate");
+                AP_BoardConfig::config_error("Baro: unable to calibrate");
             }
             hal.scheduler->delay(10);
         } while (!healthy());
@@ -231,9 +272,11 @@ void AP_Baro::calibrate(bool save)
     for (uint8_t c = 0; c < num_samples; c++) {
         uint32_t tstart = AP_HAL::millis();
         do {
+        	//hal.console->printf("tstart is:%d\n",(int)tstart);
             update();
-            if (AP_HAL::millis() - tstart > 500) {
-                AP_BoardConfig::sensor_config_error("Baro: unable to calibrate");
+			//hal.console->printf("AP_HAL is:%d\n",(int)AP_HAL::millis());
+			if (AP_HAL::millis() - tstart > 500) {
+                AP_BoardConfig::config_error("Baro: unable to calibrate");
             }
         } while (!healthy());
         for (uint8_t i=0; i<_num_sensors; i++) {
@@ -267,7 +310,7 @@ void AP_Baro::calibrate(bool save)
     if (num_calibrated) {
         return;
     }
-    AP_BoardConfig::sensor_config_error("AP_Baro: all sensors uncalibrated");
+    AP_BoardConfig::config_error("AP_Baro: all sensors uncalibrated");
 }
 
 /*
@@ -460,13 +503,18 @@ void AP_Baro::init(void)
         _user_ground_temperature.notify();
     }
 
+    // zero bus IDs before probing
+    for (uint8_t i = 0; i < BARO_MAX_INSTANCES; i++) {
+        sensors[i].bus_id.set(0);
+    }
+
     if (_hil_mode) {
         drivers[0] = new AP_Baro_HIL(*this);
         _num_drivers = 1;
         return;
     }
 
-#if HAL_WITH_UAVCAN
+#if HAL_ENABLE_LIBUAVCAN_DRIVERS
     // Detect UAVCAN Modules, try as many times as there are driver slots
     for (uint8_t i = 0; i < BARO_MAX_DRIVERS; i++) {
         ADD_BACKEND(AP_Baro_UAVCAN::probe(*this));
@@ -559,10 +607,7 @@ void AP_Baro::init(void)
     if (sitl == nullptr) {
         AP_HAL::panic("No SITL pointer");
     }
-    if (sitl->baro_count > 1) {
-        ::fprintf(stderr, "More than one baro not supported.  Sorry.");
-    }
-    if (sitl->baro_count == 1) {
+    for(uint8_t i = 0; i < sitl->baro_count; i++) {
         ADD_BACKEND(new AP_Baro_SITL(*this));
     }
 #elif HAL_BARO_DEFAULT == HAL_BARO_HIL
@@ -603,7 +648,15 @@ void AP_Baro::init(void)
 #if !defined(HAL_BARO_ALLOW_INIT_NO_BARO) // most boards requires external baro
 
     if (_num_drivers == 0 || _num_sensors == 0 || drivers[0] == nullptr) {
-        AP_BoardConfig::sensor_config_error("Baro: unable to initialise driver");
+        AP_BoardConfig::config_error("Baro: unable to initialise driver");
+    }
+#endif
+#ifdef HAL_BUILD_AP_PERIPH
+    // AP_Periph always is set calibrated. We only want the pressure,
+    // so ground calibration is unnecessary
+    for (uint8_t i=0; i<_num_sensors; i++) {
+        sensors[i].calibrated = true;
+        sensors[i].alt_ok = true;
     }
 #endif
 }
@@ -638,6 +691,14 @@ void AP_Baro::_probe_i2c_barometers(void)
                                               std::move(GET_I2C_DEVICE(i, HAL_BARO_BMP280_I2C_ADDR))));
             ADD_BACKEND(AP_Baro_BMP280::probe(*this,
                                               std::move(GET_I2C_DEVICE(i, HAL_BARO_BMP280_I2C_ADDR2))));
+        }
+    }
+    if (probe & PROBE_SPL06) {
+        FOREACH_I2C_MASK(i,mask) {
+            ADD_BACKEND(AP_Baro_SPL06::probe(*this,
+                                              std::move(GET_I2C_DEVICE(i, HAL_BARO_SPL06_I2C_ADDR))));
+            ADD_BACKEND(AP_Baro_SPL06::probe(*this,
+                                              std::move(GET_I2C_DEVICE(i, HAL_BARO_SPL06_I2C_ADDR2))));
         }
     }
     if (probe & PROBE_BMP388) {
@@ -743,7 +804,16 @@ void AP_Baro::update(void)
             drivers[i]->backend_update(i);
         }
     }
-
+	
+	// 
+	if (_hil_mode) {
+		for (uint8_t i=0; i<_num_sensors; i++) {
+            sensors[i].healthy = true;
+			sensors[i].alt_ok=true;
+			// sensors[i].calibrated=true;
+        } 
+	}
+	
     for (uint8_t i=0; i<_num_sensors; i++) {
         if (sensors[i].healthy) {
             // update altitude calculation
@@ -752,15 +822,19 @@ void AP_Baro::update(void)
                 sensors[i].ground_pressure = sensors[i].pressure;
             }
             float altitude = sensors[i].altitude;
-            float corrected_pressure = sensors[i].pressure + sensors[i].p_correction;
-            if (sensors[i].type == BARO_TYPE_AIR) {
-                altitude = get_altitude_difference(sensors[i].ground_pressure, corrected_pressure);
-            } else if (sensors[i].type == BARO_TYPE_WATER) {
-                //101325Pa is sea level air pressure, 9800 Pascal/ m depth in water.
-                //No temperature or depth compensation for density of water.
-                altitude = (sensors[i].ground_pressure - corrected_pressure) / 9800.0f / _specific_gravity;
-            }
-            // sanity check altitude
+			
+			if ( !_hil_mode ) {
+				float corrected_pressure = sensors[i].pressure + sensors[i].p_correction;
+				if (sensors[i].type == BARO_TYPE_AIR) {
+					altitude = get_altitude_difference(sensors[i].ground_pressure, corrected_pressure);
+				} else if (sensors[i].type == BARO_TYPE_WATER) {
+					//101325Pa is sea level air pressure, 9800 Pascal/ m depth in water.
+					//No temperature or depth compensation for density of water.
+					altitude = (sensors[i].ground_pressure - corrected_pressure) / 9800.0f / _specific_gravity;
+				}
+				// sanity check altitude
+			}
+			
             sensors[i].alt_ok = !(isnan(altitude) || isinf(altitude));
             if (sensors[i].alt_ok) {
                 sensors[i].altitude = altitude + _alt_offset_active;
